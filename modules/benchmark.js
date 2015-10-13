@@ -8,6 +8,8 @@ var storage       = require("../modules/storage"),
     logger        = require('../modules/logger'),
     crypto        = require('crypto'),
     http          = require('http'),
+    https         = require('https'),
+    httpAgents    = {http:http, https:https},
     fs            = require('fs'),
     os            = require('os'),
     util          = require('util'),
@@ -19,6 +21,20 @@ var storage       = require("../modules/storage"),
     stopTimeout   = null,
     timerInterval = null,
     stopCallback  = null;
+
+var desiredProtocol = 'desiredProtocol',
+    verifyProtocol = function(benchmark){
+      if(benchmark && benchmark[desiredProtocol] && (typeof benchmark[desiredProtocol] === 'string' )){
+        benchmark[desiredProtocol] = benchmark[desiredProtocol].toLowerCase();
+        if(benchmark[desiredProtocol] === 'http' || benchmark[desiredProtocol] === 'https' ){
+          return true;
+        }
+      }
+      return false;
+    },
+    getProtocol = function(benchmark){
+      return (verifyProtocol(benchmark))?  benchmark[desiredProtocol].toLowerCase() : 'http';
+    };
 
 // Global running state
 exports.start   = function(){
@@ -62,9 +78,9 @@ exports.load = function(callback){
 exports.resetData = function(callback){
   var keys = [
     "bigbench_total",
-    "bigbench_total_duration", 
-    "bigbench_timing", 
-    "bigbench_total_series", 
+    "bigbench_total_duration",
+    "bigbench_timing",
+    "bigbench_total_series",
     "bigbench_total_duration_series",
     "bigbench_statistics"
   ];
@@ -80,32 +96,33 @@ exports.resetData = function(callback){
 // Runs the latest benchmark - used in bot
 exports.run = function(done){
   if(status !== "STOPPED"){ return; }
-  
+
   // load
   exports.load(function(benchmark){
-  
+
     // options
     benchmark.duration      = benchmark.duration      || 60;
     benchmark.delay         = benchmark.delay         || 0;
     benchmark.rampDownDelay = benchmark.rampDownDelay || 0;
     benchmark.concurrency   = benchmark.concurrency   || 1;
+    benchmark.desiredProtocol   = getProtocol(benchmark);
     if(!benchmark.actions || benchmark.actions.length <= 0) throw "Please add at least one action...";
-  
+
     // stop
     stopTimeout = setTimeout(exports.stop, benchmark.duration * 1000);
-    
+
     // timer
     t = 0;
     timerInterval = setInterval(function(){ t += 0.1; }, 100);
-  
+
     // start concurrent
     exports.start();
     for (var i = 0; i < benchmark.concurrency; i++) {
-      var agent = new http.Agent({ maxSockets: 1 }),
+      var agent = new httpAgents[benchmark.desiredProtocol].Agent({ maxSockets: 1 }),
           state = {};
       exports.request(benchmark, 0, agent, null, null, state);
     };
-    
+
     stopCallback = done;
   });
 }
@@ -113,48 +130,49 @@ exports.run = function(done){
 // Cycle through all actions and request it
 exports.request = function(benchmark, index, agent, lastResponse, lastAction, state){
   if(status !== "RUNNING"){ return; }
-  
-  var action   = benchmark.actions[index](lastResponse, lastAction, state),
-      options  = exports.validateAction(action, agent),
+
+  var action   = benchmark.actions[index](lastResponse, lastAction, state);
+
+  var options  = exports.validateAction(action, agent),
       options  = exports.validateProxy(options, benchmark, action),
       delay    = exports.calculateDelay(benchmark),
       duration = 0,
       started  = new Date().getTime(),
-      request  = http.request(options, function(response) {
+      request  = httpAgents[benchmark.desiredProtocol].request(options, function(response) {
         response.setEncoding('utf8');
         response.on('readable', function(){
           response.body = response.read();
         });
         response.on('end', function () {
-          
+
           // duration
           duration = new Date().getTime() - started;
-          
+
           // track
           tracker.track(index, response.statusCode, duration);
-          
+
           // next action / request
           index += 1;
           if(index > benchmark.actions.length - 1){
             if(testrun){ exports.stop(); }
             index = 0
           };
-          
+
           // delay
-          
-          
+
+
           // call with or without delay
           if(delay <= 0){ exports.request(benchmark, index, agent, response, action, state); }
           else{ setTimeout(function(){exports.request(benchmark, index, agent, response, action, state); }, delay); }
         });
-        
-        
+
+
       });
-  
-  
+
+
   // send post params in body
   if(action.method === "POST"){ request.write(exports.validateParams(action.params)); }
-  
+
   request.end();
 }
 
@@ -179,7 +197,7 @@ exports.validateAction = function(action, agent){
     var queryString = exports.validateParams(action.params);
     if(queryString !== ""){ options.path += "?" + queryString }
   }
-  
+
   return options;
 }
 
@@ -187,30 +205,30 @@ exports.validateAction = function(action, agent){
 exports.validateHeaders = function(action){
   var headers    = action.headers || {},
       newHeaders = {};
-  
+
   // default post header
   if(action.method === "POST"){ newHeaders = { "content-type": "application/x-www-form-urlencoded" }; }
-  
+
   // lowercase all keys
   Object.keys(headers).forEach(function(key){
     newHeaders[key.toLowerCase()] = headers[key];
   });
-  
+
   return newHeaders;
 }
 
 // Checks if a global proxy is set and applies it to the request
 exports.validateProxy = function(options, benchmark, action){
   if(benchmark.proxyUrl && benchmark.proxyPort){
-    
+
     // add host to headers
     options.headers.host = options.headers.host || action.hostname + ":" + action.port;
-    
+
     // modify paths to allow node to perform proxy request
     options.path     = "http://" + options.hostname + ":" + options.port + options.path;
     options.hostname = benchmark.proxyUrl;
     options.port     = benchmark.proxyPort;
-    
+
   }
   return options;
 }
@@ -251,16 +269,16 @@ exports.createBenchmarkFromTemplate = function(callback){
       template2 = fs.createReadStream(__dirname + '/../templates/config.js'),
       copy      = fs.createWriteStream('benchmark.js'),
       copy2     = fs.createWriteStream('config.js');
-  
+
   template.on('close', function(){
     console.log(color.green + "Created benchmark.js" + color.reset);
   })
-  
+
   template2.on('close', function(){
     console.log(color.green + "Created config.js" + color.reset);
     callback();
   });
-  
+
   template.pipe(copy);
   template2.pipe(copy2);
 }
@@ -270,10 +288,10 @@ exports.createBenchmarkFromTemplate = function(callback){
 exports.saveBenchmarkFromArgument = function(callback){
   if(!process.argv[3]){ throw "Please supply a benchmark file..."};
   var benchmarkString = fs.readFileSync(process.argv[3]);
-  
+
   // throws an error if benchmark is invalid
   eval(benchmarkString);
-  
+
   // save
   exports.save(benchmarkString, callback);
 }
@@ -283,10 +301,10 @@ exports.saveBenchmarkFromArgument = function(callback){
 exports.testBenchmarkFromArgument = function(callback){
   if(!process.argv[3]){ throw "Please supply a benchmark file..."};
   var benchmarkString = fs.readFileSync(process.argv[3]);
-  
+
   // throws an error if benchmark is invalid
   eval(benchmarkString);
-  
+
   // save and run once
   exports.save(benchmarkString, function(){
     testrun = true;
@@ -317,7 +335,7 @@ exports.setupTiming = function(benchmark, callback){
         "START": start.toString(),
         "STOP" : (start + (benchmark.duration * 1000)).toString()
       };
-  
+
   // Save Timing with or without Ramp
   bot.all(function(bots){
     if(bots.length <= 0) throw "Please start a bot first..."
